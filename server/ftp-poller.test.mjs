@@ -166,6 +166,16 @@ describe('FTP 轮询器', () => {
     }
   })
 
+  it('收件目录为根路径时生成单斜杠路径', async () => {
+    const client = fakeClient([fileInfo('plate.png', { modifiedAt: new Date(Date.now() - 5000) })])
+    const recognize = vi.fn(async () => okResult)
+    const poller = createFtpPoller({ client, recognize, ftpConfig: config, inboxDir: '/', onResult: vi.fn() })
+    await poller.pollOnce()
+    expect(client.calls.some(call => call === 'downloadTo /plate.png')).toBe(true)
+    const rename = client.calls.find(call => call.startsWith('rename'))
+    expect(rename).toMatch(/^rename \/plate\.png -> \/processed\/\d{8}-\d{6}-\d{3}_plate\.png$/)
+  })
+
   it('跳过目录条目', async () => {
     const client = fakeClient([
       { name: 'processed', type: FileType.Directory },

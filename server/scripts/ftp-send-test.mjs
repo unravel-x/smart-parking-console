@@ -18,7 +18,7 @@ const client = new Client()
 try {
   await client.access(config)
   await client.ensureDir(config.inboxDir)
-  const remote = `${config.inboxDir}/${Date.now()}_${path.basename(filePath)}`
+  const remote = `${config.inboxDir}/${Date.now()}_${path.basename(filePath)}`.replace(/\/{2,}/g, '/')
   await client.uploadFrom(filePath, remote)
   console.log(`已上传：${remote}`)
 } catch (error) {

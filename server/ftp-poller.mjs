@@ -54,8 +54,9 @@ export function createFtpPoller({
   let busy = false
   const pending = new Map()
   const handled = new Map()
-  const processedDir = `${inboxDir}/processed`
-  const failedDir = `${inboxDir}/failed`
+  const remotePath = (...parts) => parts.join('/').replace(/\/{2,}/g, '/')
+  const processedDir = remotePath(inboxDir, 'processed')
+  const failedDir = remotePath(inboxDir, 'failed')
 
   function stamp() {
     const d = new Date()
@@ -72,12 +73,13 @@ export function createFtpPoller({
   }
 
   async function moveTo(dir, name) {
-    const target = `${dir}/${stamp()}_${name}`
+    const source = remotePath(inboxDir, name)
+    const target = remotePath(dir, `${stamp()}_${name}`)
     try {
-      await client.rename(`${inboxDir}/${name}`, target)
+      await client.rename(source, target)
     } catch (error) {
       await client.ensureDir(dir)
-      await client.rename(`${inboxDir}/${name}`, target)
+      await client.rename(source, target)
     }
   }
 
@@ -132,7 +134,7 @@ export function createFtpPoller({
         }
         const sink = createMemorySink(MAX_IMAGE_BYTES)
         try {
-          await client.downloadTo(sink.writable, `${inboxDir}/${info.name}`)
+          await client.downloadTo(sink.writable, remotePath(inboxDir, info.name))
         } catch (error) {
           onError(error, `download ${info.name}`)
           continue
