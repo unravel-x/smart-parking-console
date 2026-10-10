@@ -16,7 +16,7 @@ export interface ParkingEvent {
   laneId: string
   capturedAt: string
   confidence: number | null
-  recognitionSource: 'demo' | 'manual' | 'api'
+  recognitionSource: 'demo' | 'manual' | 'api' | 'ftp'
   plateColor?: string | null
   providerRequestId?: string | null
 }

@@ -1,15 +1,18 @@
 import express from 'express'
 import multer from 'multer'
 import { createTencentRecognizer, normalizeTencentResult } from './tencent-ocr.mjs'
+import { MAX_IMAGE_BYTES, detectImageType } from './image-utils.mjs'
+import { createFtpClient, createFtpPoller, ftpConfigFromEnv } from './ftp-poller.mjs'
+import { createFtpResultStore } from './ftp-results.mjs'
 
-const MAX_IMAGE_BYTES = 4 * 1024 * 1024
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_IMAGE_BYTES, files: 1 } })
 
-function isSupportedImage(file) {
-  const bytes = file.buffer
-  const png = bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
-  const jpeg = bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
-  return (file.mimetype === 'image/png' && png) || (file.mimetype === 'image/jpeg' && jpeg)
+const LOCAL_ORIGINS = new Set(['http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:5174', 'http://localhost:5174', 'http://127.0.0.1:4173', 'http://localhost:4173'])
+
+function localOriginOnly(req, res, next) {
+  const origin = req.get('Origin')
+  if (origin && !LOCAL_ORIGINS.has(origin)) return res.status(403).json({ code: 'ORIGIN_FORBIDDEN', message: '只允许从本地停车系统页面访问' })
+  next()
 }
 
 function errorResponse(error) {
@@ -26,22 +29,49 @@ function errorResponse(error) {
   return { status: 502, code: 'OCR_UPSTREAM_ERROR', message: '识别服务暂时不可用，请稍后重试或手动录入' }
 }
 
-export function createApp({ recognize = createTencentRecognizer() } = {}) {
+export function createApp({ recognize = createTencentRecognizer(), ftpPoller, ftpResults = createFtpResultStore() } = {}) {
   const app = express()
   app.disable('x-powered-by')
   app.use('/api', (_req, res, next) => { res.set('Cache-Control', 'no-store'); res.set('X-Content-Type-Options', 'nosniff'); next() })
+  app.use('/api', localOriginOnly)
   app.get('/api/health', (_req, res) => res.json({ status: 'ok' }))
-  app.post('/api/recognitions', (req, res, next) => {
-    const origin = req.get('Origin')
-    const allowedOrigins = new Set(['http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:5174', 'http://localhost:5174', 'http://127.0.0.1:4173', 'http://localhost:4173'])
-    if (origin && !allowedOrigins.has(origin)) return res.status(403).json({ code: 'ORIGIN_FORBIDDEN', message: '只允许从本地停车系统页面提交识别请求' })
-    next()
-  }, upload.single('image'), async (req, res) => {
+  app.post('/api/recognitions', upload.single('image'), async (req, res) => {
     if (!req.file) return res.status(400).json({ code: 'IMAGE_REQUIRED', message: '请先上传抓拍图片' })
-    if (!isSupportedImage(req.file)) return res.status(415).json({ code: 'UNSUPPORTED_IMAGE', message: '只支持真实的 JPG 或 PNG 图片' })
+    const type = detectImageType(req.file.buffer)
+    if (!type || req.file.mimetype !== type) return res.status(415).json({ code: 'UNSUPPORTED_IMAGE', message: '只支持真实的 JPG 或 PNG 图片' })
     const raw = await recognize(req.file.buffer)
     return res.json(normalizeTencentResult(raw))
   })
+
+  let poller = ftpPoller
+  if (poller === undefined) {
+    const config = ftpConfigFromEnv()
+    poller = config
+      ? createFtpPoller({
+          client: createFtpClient(),
+          ftpConfig: config,
+          inboxDir: config.inboxDir,
+          recognize: async (buffer) => normalizeTencentResult(await recognize(buffer)),
+          onResult: (item) => ftpResults.push(item),
+          onError: (error, context) => console.error(`[FTP] ${context ?? '轮询'}: ${error?.message ?? String(error)}`),
+        })
+      : null
+  }
+  ftpResults.setConfigured(Boolean(poller))
+  app.locals.ftpPoller = poller
+  app.startFtpPoller = () => { poller?.start() }
+
+  app.get('/api/ftp-results', (req, res) => {
+    const rawSince = req.query.since
+    const sinceId = typeof rawSince === 'string' && /^\d+$/.test(rawSince) ? Number(rawSince) : null
+    res.json(ftpResults.list(sinceId))
+  })
+  app.get('/api/ftp-images/:id', (req, res) => {
+    const image = ftpResults.getImage(Number(req.params.id))
+    if (!image) return res.status(404).json({ code: 'FTP_IMAGE_NOT_FOUND', message: '图片已过期或不存在（仅保留最近 20 张）' })
+    res.type(image.imageType).send(image.buffer)
+  })
+
   app.use((error, _req, res, _next) => {
     const detail = errorResponse(error)
     res.status(detail.status).json({ code: detail.code, message: detail.message, requestId: error?.requestId ?? null })
