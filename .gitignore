@@ -9,3 +9,4 @@ dist
 .playwright-cli
 /output/
 /车牌照片（京Q01US9）.jpg
+/plates/
